@@ -4,4 +4,13 @@ batched-flume-appender will batch the log it received till the batch is full or 
 
 Copyed a lot of code from [flume log4jAppender](https://flume.apache.org/FlumeUserGuide.html#log4j-appender), if there's any problem please let me know.
 
+Usage:
+```
+<dependency>
+    <groupId>org.clojars.ylgrgyq</groupId>
+    <artifactId>batched-flume-appender</artifactId>
+    <version>1.0-SNAPSHOT</version>
+</dependency>
+```
+
 
