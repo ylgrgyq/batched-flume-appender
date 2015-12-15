@@ -25,6 +25,8 @@ import java.nio.charset.Charset;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Properties;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.BlockingQueue;
 
 /**
  * Created on 15/11/2.
@@ -45,58 +47,138 @@ public class Log4jAppender extends AppenderSkeleton {
     private long delayNanos;
     private int delayMillis;
 
-    RpcClient rpcClient = null;
+    private int eventQueueSize = 10000;
+    private BlockingQueue<Event> queue = new ArrayBlockingQueue<>(eventQueueSize);
 
+    private volatile WorkerAppender worker = null;
 
     /**
      * If this constructor is used programmatically rather than from a log4j conf
      * you must set the <tt>port</tt> and <tt>hostname</tt> and then call
      * <tt>activateOptions()</tt> before calling <tt>append()</tt>.
      */
-    public Log4jAppender(){
+    public Log4jAppender() {
+
     }
 
     /**
      * Sets the hostname and port. Even if these are passed the
      * <tt>activateOptions()</tt> function must be called before calling
      * <tt>append()</tt>, else <tt>append()</tt> will throw an Exception.
-     * @param hostname The first hop where the client should connect to.
-     * @param port The port to connect on the host.
      *
+     * @param hostname The first hop where the client should connect to.
+     * @param port     The port to connect on the host.
      */
-    public Log4jAppender(String hostname, int port){
+    public Log4jAppender(String hostname, int port) {
         this.hostname = hostname;
         this.port = port;
     }
 
-    private synchronized void append(BatchEvent batchEvent) {
-        LogLog.error("send with batch append. batchSize=" + batchEvent.getEvents().size());
-        try {
-            rpcClient.appendBatch(batchEvent.getEvents());
-        } catch (EventDeliveryException e) {
-            String msg = "Flume batch append() failed.";
-            LogLog.error(msg, e);
-            if (unsafeMode) {
-                return;
+    private class WorkerAppender implements Runnable {
+        private RpcClient rpcClient;
+        private volatile boolean workerContinue = true;
+
+        public WorkerAppender(RpcClient rpcClient) {
+            this.rpcClient = rpcClient;
+        }
+
+        private void sendBatchEvent() {
+            LogLog.error("send with batch append. batchSize=" + batchEvent.getEvents().size());
+            try {
+                rpcClient.appendBatch(batchEvent.getEvents());
+            } catch (EventDeliveryException e) {
+                String msg = "Flume worker appender batch append() failed.";
+                LogLog.error(msg, e);
             }
-            throw new FlumeException(msg + " Exception follows.", e);
+        }
+
+        @Override
+        public void run() {
+            while (workerContinue) {
+                try {
+                    Event flumeEvent = queue.take();
+
+                    if (!rpcClient.isActive()) {
+                        reconnect();
+                    }
+
+                    if (batchSize == 1) {
+                        try {
+                            rpcClient.append(flumeEvent);
+                        } catch (EventDeliveryException e) {
+                            String msg = "Flume worker appender append() failed.";
+                            LogLog.error(msg, e);
+                        }
+                    } else {
+                        batchEvent.addEvent(flumeEvent);
+                        final int eventCount = batchEvent.getEvents().size();
+                        if (eventCount == 1) {
+                            nextSend = System.currentTimeMillis() + delayMillis;
+                        } else if (eventCount >= batchSize || System.currentTimeMillis() >= nextSend) {
+                            sendBatchEvent();
+                            batchEvent = new BatchEvent(batchSize);
+                        }
+                    }
+                } catch (InterruptedException e) {
+                    // ignore
+                } catch (FlumeException e) {
+                    LogLog.error("Flume worker appender connection failed", e);
+                }
+            }
+        }
+
+        public synchronized void close(){
+            workerContinue = false;
+
+            closeRpcClient();
+        }
+
+        private synchronized void closeRpcClient(){
+            // Any append calls after this will result in an Exception.
+            if (rpcClient != null) {
+                try {
+                    rpcClient.close();
+                } catch (FlumeException ex) {
+                    LogLog.error("Error while trying to close RpcClient.", ex);
+                    if (unsafeMode) {
+                        return;
+                    }
+                    throw ex;
+                } finally {
+                    rpcClient = null;
+                }
+            } else {
+                String errorMsg = "Flume log4jappender already closed!";
+                LogLog.error(errorMsg);
+                if (unsafeMode) {
+                    return;
+                }
+                throw new FlumeException(errorMsg);
+            }
+        }
+
+        private synchronized void reconnect() throws FlumeException {
+            closeRpcClient();
+
+            rpcClient = createRpcClient();
         }
     }
 
     /**
      * Append the LoggingEvent, to send to the first Flume hop.
+     *
      * @param event The LoggingEvent to be appended to the flume.
      * @throws FlumeException if the appender was closed,
-     * or the hostname and port were not setup, there was a timeout, or there
-     * was a connection error.
+     *                        or the hostname and port were not setup, there was a timeout, or there
+     *                        was a connection error.
      */
     @Override
-    public synchronized void append(LoggingEvent event) throws FlumeException{
-        //If rpcClient is null, it means either this appender object was never
+    public void append(LoggingEvent event) throws FlumeException {
+        //If worker is null, it means either this appender object was never
         //setup by setting hostname and port and then calling activateOptions
         //or this appender object was closed by calling close(), so we throw an
         //exception to show the appender is no longer accessible.
-        if (rpcClient == null) {
+        if (worker == null){
             String errorMsg = "Cannot Append to Appender! Appender either closed or" +
                     " not setup correctly!";
             LogLog.error(errorMsg);
@@ -104,10 +186,6 @@ public class Log4jAppender extends AppenderSkeleton {
                 return;
             }
             throw new FlumeException(errorMsg);
-        }
-
-        if(!rpcClient.isActive()){
-            reconnect();
         }
 
         //Client created first time append is called.
@@ -138,26 +216,9 @@ public class Log4jAppender extends AppenderSkeleton {
             flumeEvent = EventBuilder.withBody(msg, Charset.forName("UTF8"), hdrs);
         }
 
-        if (batchSize == 1) {
-            try {
-                rpcClient.append(flumeEvent);
-            } catch (EventDeliveryException e) {
-                String msg = "Flume append() failed.";
-                LogLog.error(msg, e);
-                if (unsafeMode) {
-                    return;
-                }
-                throw new FlumeException(msg + " Exception follows.", e);
-            }
-        } else {
-            batchEvent.addEvent(flumeEvent);
-            final int eventCount = batchEvent.getEvents().size();
-            if (eventCount == 1) {
-                nextSend = System.currentTimeMillis() + delayMillis;
-            } else if (eventCount >= batchSize || System.currentTimeMillis() >= nextSend){
-                append(batchEvent);
-                batchEvent = new BatchEvent(batchSize);
-            }
+        while (! queue.offer(flumeEvent)) {
+            LogLog.warn("Bached flume appender overflowed.");
+            queue.poll();
         }
     }
 
@@ -201,27 +262,21 @@ public class Log4jAppender extends AppenderSkeleton {
      * Closes underlying client.
      * If <tt>append()</tt> is called after this function is called,
      * it will throw an exception.
+     *
      * @throws FlumeException if errors occur during close
      */
     @Override
     public synchronized void close() throws FlumeException {
-        // Any append calls after this will result in an Exception.
-        if (rpcClient != null) {
+        if (worker != null){
             try {
-                rpcClient.close();
-            } catch (FlumeException ex) {
-                LogLog.error("Error while trying to close RpcClient.", ex);
-                if (unsafeMode) {
-                    return;
-                }
-                throw ex;
+                worker.close();
             } finally {
-                rpcClient = null;
+                worker = null;
             }
         } else {
             String errorMsg = "Flume log4jappender already closed!";
             LogLog.error(errorMsg);
-            if(unsafeMode) {
+            if (unsafeMode) {
                 return;
             }
             throw new FlumeException(errorMsg);
@@ -239,17 +294,19 @@ public class Log4jAppender extends AppenderSkeleton {
 
     /**
      * Set the first flume hop hostname.
+     *
      * @param hostname The first hop where the client should connect to.
      */
-    public void setHostname(String hostname){
+    public void setHostname(String hostname) {
         this.hostname = hostname;
     }
 
     /**
      * Set the port on the hostname to connect to.
+     *
      * @param port The port to connect on the host.
      */
-    public void setPort(int port){
+    public void setPort(int port) {
         this.port = port;
     }
 
@@ -293,6 +350,14 @@ public class Log4jAppender extends AppenderSkeleton {
         this.delayMillis = delayMillis;
     }
 
+    public int getEventQueueSize() {
+        return eventQueueSize;
+    }
+
+    public void setEventQueueSize(int eventQueueSize) {
+        this.eventQueueSize = eventQueueSize;
+    }
+
     /**
      * Activate the options set using <tt>setPort()</tt>
      * and <tt>setHostname()</tt>
@@ -302,6 +367,13 @@ public class Log4jAppender extends AppenderSkeleton {
      */
     @Override
     public void activateOptions() throws FlumeException {
+        if (worker == null) {
+            worker = new WorkerAppender(createRpcClient());
+            new Thread(worker).start();
+        }
+    }
+
+    private RpcClient createRpcClient() {
         Properties props = new Properties();
         props.setProperty(RpcClientConfigurationConstants.CONFIG_HOSTS, "h1");
         props.setProperty(RpcClientConfigurationConstants.CONFIG_HOSTS_PREFIX + "h1",
@@ -310,6 +382,7 @@ public class Log4jAppender extends AppenderSkeleton {
                 String.valueOf(timeout));
         props.setProperty(RpcClientConfigurationConstants.CONFIG_REQUEST_TIMEOUT,
                 String.valueOf(timeout));
+        RpcClient rpcClient;
         try {
             rpcClient = RpcClientFactory.getInstance(props);
             if (layout != null) {
@@ -320,18 +393,11 @@ public class Log4jAppender extends AppenderSkeleton {
                     e.getMessage();
             LogLog.error(errormsg);
             if (unsafeMode) {
-                return;
+                return null;
             }
             throw e;
         }
-    }
 
-    /**
-     * Make it easy to reconnect on failure
-     * @throws FlumeException
-     */
-    private void reconnect() throws FlumeException {
-        close();
-        activateOptions();
+        return rpcClient;
     }
 }
