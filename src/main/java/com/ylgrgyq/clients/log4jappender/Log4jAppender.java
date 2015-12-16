@@ -223,6 +223,8 @@ public class Log4jAppender extends AppenderSkeleton {
             flumeEvent = EventBuilder.withBody(msg, Charset.forName("UTF8"), hdrs);
         }
 
+        // append(LoggingEvent event) is synchronized and it's the only producer for the internal queue
+        // so queue.offer will only retry one times
         while (! queue.offer(flumeEvent)) {
             LogLog.warn("Bached flume appender overflowed.");
             queue.poll();
