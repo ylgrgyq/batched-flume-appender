@@ -1,4 +1,4 @@
-Flume log4jAppender can only sent log one by one in order to insure that only send new log after the previouse log is safely received by the next flume agent. But this kind of behavior will make the application which using this appender lib performance suffer. 
+Flume log4jAppender can only sent log event one after another in a synchronized way. Which means it'll block if there's a pending log event exist until this pending log event is confirmed receiption by flume agent. 
 
 batched-flume-appender will batch the log it received till the batch is full or some specific delay time is reached. 
 
