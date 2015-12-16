@@ -42,8 +42,6 @@ public class Log4jAppender extends AppenderSkeleton {
     private boolean avroReflectionEnabled;
     private String avroSchemaUrl;
     private int batchSize;
-    private BatchEvent batchEvent = new BatchEvent();
-    private long nextSend = 0;
     private long delayNanos;
     private int delayMillis;
 
@@ -77,13 +75,14 @@ public class Log4jAppender extends AppenderSkeleton {
     private class WorkerAppender implements Runnable {
         private RpcClient rpcClient;
         private volatile boolean workerContinue = true;
+        private long nextSend = 0;
+        private BatchEvent batchEvent = new BatchEvent();
 
         public WorkerAppender(RpcClient rpcClient) {
             this.rpcClient = rpcClient;
         }
 
         private void sendBatchEvent() {
-            LogLog.error("send with batch append. batchSize=" + batchEvent.getEvents().size());
             try {
                 rpcClient.appendBatch(batchEvent.getEvents());
             } catch (EventDeliveryException e) {
@@ -106,8 +105,7 @@ public class Log4jAppender extends AppenderSkeleton {
                         try {
                             rpcClient.append(flumeEvent);
                         } catch (EventDeliveryException e) {
-                            String msg = "Flume worker appender append() failed.";
-                            LogLog.error(msg, e);
+                            LogLog.error("Flume worker appender append() failed.", e);
                         }
                     } else {
                         batchEvent.addEvent(flumeEvent);
@@ -125,6 +123,8 @@ public class Log4jAppender extends AppenderSkeleton {
                     LogLog.error("Flume worker appender connection failed", e);
                 }
             }
+
+            LogLog.warn("Flume worker shutdown!");
         }
 
         public void close(){
@@ -133,7 +133,7 @@ public class Log4jAppender extends AppenderSkeleton {
             closeRpcClient();
         }
 
-        private synchronized void closeRpcClient(){
+        private synchronized void closeRpcClient() throws FlumeException{
             // Any append calls after this will result in an Exception.
             if (rpcClient != null) {
                 try {
@@ -148,7 +148,7 @@ public class Log4jAppender extends AppenderSkeleton {
                     rpcClient = null;
                 }
             } else {
-                String errorMsg = "Flume log4jappender already closed!";
+                String errorMsg = "RpcClinet in Flume worker already closed!";
                 LogLog.error(errorMsg);
                 if (unsafeMode) {
                     return;
@@ -160,7 +160,14 @@ public class Log4jAppender extends AppenderSkeleton {
         private synchronized void reconnect() throws FlumeException {
             closeRpcClient();
 
-            rpcClient = createRpcClient();
+            try {
+                rpcClient = createRpcClient();
+            } catch (FlumeException e) {
+                LogLog.error("RPC client recreation failed! " + e.getMessage());
+                workerContinue = false;
+
+                throw e;
+            }
         }
     }
 
@@ -369,12 +376,24 @@ public class Log4jAppender extends AppenderSkeleton {
     public synchronized void activateOptions() throws FlumeException {
         if (worker == null) {
             queue = new ArrayBlockingQueue<>(eventQueueSize);
-            worker = new WorkerAppender(createRpcClient());
+
+            RpcClient client;
+            try {
+                client = createRpcClient();
+            } catch (FlumeException e) {
+                LogLog.error("RPC client creation failed! " + e.getMessage());
+                if (unsafeMode) {
+                    return;
+                }
+                throw e;
+            }
+
+            worker = new WorkerAppender(client);
             new Thread(worker).start();
         }
     }
 
-    private RpcClient createRpcClient() {
+    private RpcClient createRpcClient() throws FlumeException{
         Properties props = new Properties();
         props.setProperty(RpcClientConfigurationConstants.CONFIG_HOSTS, "h1");
         props.setProperty(RpcClientConfigurationConstants.CONFIG_HOSTS_PREFIX + "h1",
@@ -383,20 +402,10 @@ public class Log4jAppender extends AppenderSkeleton {
                 String.valueOf(timeout));
         props.setProperty(RpcClientConfigurationConstants.CONFIG_REQUEST_TIMEOUT,
                 String.valueOf(timeout));
-        RpcClient rpcClient;
-        try {
-            rpcClient = RpcClientFactory.getInstance(props);
-            if (layout != null) {
-                layout.activateOptions();
-            }
-        } catch (FlumeException e) {
-            String errormsg = "RPC client creation failed! " +
-                    e.getMessage();
-            LogLog.error(errormsg);
-            if (unsafeMode) {
-                return null;
-            }
-            throw e;
+
+        RpcClient rpcClient = RpcClientFactory.getInstance(props);
+        if (layout != null) {
+            layout.activateOptions();
         }
 
         return rpcClient;
