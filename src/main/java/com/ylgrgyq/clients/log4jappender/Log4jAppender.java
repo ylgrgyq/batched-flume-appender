@@ -48,9 +48,9 @@ public class Log4jAppender extends AppenderSkeleton {
     private int delayMillis;
 
     private int eventQueueSize = 10000;
-    private BlockingQueue<Event> queue = new ArrayBlockingQueue<>(eventQueueSize);
+    private BlockingQueue<Event> queue;
 
-    private volatile WorkerAppender worker = null;
+    private WorkerAppender worker = null;
 
     /**
      * If this constructor is used programmatically rather than from a log4j conf
@@ -127,7 +127,7 @@ public class Log4jAppender extends AppenderSkeleton {
             }
         }
 
-        public synchronized void close(){
+        public void close(){
             workerContinue = false;
 
             closeRpcClient();
@@ -173,7 +173,7 @@ public class Log4jAppender extends AppenderSkeleton {
      *                        was a connection error.
      */
     @Override
-    public void append(LoggingEvent event) throws FlumeException {
+    public synchronized void append(LoggingEvent event) throws FlumeException {
         //If worker is null, it means either this appender object was never
         //setup by setting hostname and port and then calling activateOptions
         //or this appender object was closed by calling close(), so we throw an
@@ -366,8 +366,9 @@ public class Log4jAppender extends AppenderSkeleton {
      *                        <tt>port</tt> combination is invalid.
      */
     @Override
-    public void activateOptions() throws FlumeException {
+    public synchronized void activateOptions() throws FlumeException {
         if (worker == null) {
+            queue = new ArrayBlockingQueue<>(eventQueueSize);
             worker = new WorkerAppender(createRpcClient());
             new Thread(worker).start();
         }
