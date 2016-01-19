@@ -27,6 +27,7 @@ import java.util.Map;
 import java.util.Properties;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Created on 15/11/2.
@@ -157,7 +158,7 @@ public class Log4jAppender extends AppenderSkeleton {
             }
         }
 
-        private synchronized void reconnect() throws FlumeException {
+        private synchronized void reconnect() throws FlumeException, InterruptedException {
             closeRpcClient();
 
             try {
@@ -165,7 +166,7 @@ public class Log4jAppender extends AppenderSkeleton {
             } catch (FlumeException e) {
                 LogLog.error("RPC client recreation failed! " + e.getMessage());
                 workerContinue = false;
-
+                TimeUnit.SECONDS.sleep(1);
                 throw e;
             }
         }
@@ -282,6 +283,7 @@ public class Log4jAppender extends AppenderSkeleton {
             } finally {
                 worker = null;
             }
+            LogLog.warn("Flume appender closed!");
         } else {
             String errorMsg = "Flume log4jappender already closed!";
             LogLog.error(errorMsg);
@@ -392,6 +394,7 @@ public class Log4jAppender extends AppenderSkeleton {
 
             worker = new WorkerAppender(client);
             new Thread(worker).start();
+            LogLog.warn("Flume appender initialized!");
         }
     }
 
