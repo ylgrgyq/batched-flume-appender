@@ -165,7 +165,6 @@ public class Log4jAppender extends AppenderSkeleton {
                 rpcClient = createRpcClient();
             } catch (FlumeException e) {
                 LogLog.error("RPC client recreation failed! " + e.getMessage());
-                workerContinue = false;
                 TimeUnit.SECONDS.sleep(1);
                 throw e;
             }
