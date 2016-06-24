@@ -25,8 +25,8 @@ import java.nio.charset.Charset;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Properties;
-import java.util.concurrent.ArrayBlockingQueue;
-import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.BlockingDeque;
+import java.util.concurrent.LinkedBlockingDeque;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -47,7 +47,7 @@ public class Log4jAppender extends AppenderSkeleton {
     private int delayMillis;
 
     private int eventQueueSize = 10000;
-    private BlockingQueue<Event> queue;
+    private BlockingDeque<Event> queue;
 
     private WorkerAppender worker = null;
 
@@ -79,10 +79,6 @@ public class Log4jAppender extends AppenderSkeleton {
         private long nextSend = 0;
         private BatchEvent batchEvent = new BatchEvent();
 
-        public WorkerAppender(RpcClient rpcClient) {
-            this.rpcClient = rpcClient;
-        }
-
         private void sendBatchEvent() {
             try {
                 rpcClient.appendBatch(batchEvent.getEvents());
@@ -95,10 +91,11 @@ public class Log4jAppender extends AppenderSkeleton {
         @Override
         public void run() {
             while (workerContinue) {
+                Event flumeEvent = null;
                 try {
-                    Event flumeEvent = queue.take();
+                     flumeEvent = queue.take();
 
-                    if (!rpcClient.isActive()) {
+                    if (rpcClient == null || !rpcClient.isActive()) {
                         reconnect();
                     }
 
@@ -122,6 +119,9 @@ public class Log4jAppender extends AppenderSkeleton {
                     // ignore
                 } catch (FlumeException e) {
                     LogLog.error("Flume worker appender connection failed", e);
+                    if (flumeEvent != null && ! queue.offerFirst(flumeEvent)) {
+                        LogLog.error("Flume worker internal queue is full");
+                    }
                 }
             }
 
@@ -164,7 +164,7 @@ public class Log4jAppender extends AppenderSkeleton {
             try {
                 rpcClient = createRpcClient();
             } catch (FlumeException e) {
-                LogLog.error("RPC client recreation failed! " + e.getMessage());
+                LogLog.error("RPC client reconnect failed! " + e.getMessage());
                 TimeUnit.SECONDS.sleep(1);
                 throw e;
             }
@@ -378,20 +378,8 @@ public class Log4jAppender extends AppenderSkeleton {
     @Override
     public synchronized void activateOptions() throws FlumeException {
         if (worker == null) {
-            queue = new ArrayBlockingQueue<>(eventQueueSize);
-
-            RpcClient client;
-            try {
-                client = createRpcClient();
-            } catch (FlumeException e) {
-                LogLog.error("RPC client creation failed! " + e.getMessage());
-                if (unsafeMode) {
-                    return;
-                }
-                throw e;
-            }
-
-            worker = new WorkerAppender(client);
+            queue = new LinkedBlockingDeque<>(eventQueueSize);
+            worker = new WorkerAppender();
             new Thread(worker).start();
             LogLog.warn("Flume appender initialized!");
         }
