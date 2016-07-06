@@ -58,4 +58,6 @@ Batched flume appender is very simple. When there's a log sent to batched flume 
 
 The worker thread will sent at most BatchSize logs to flume agent at one time when it consumes BatchSize logs or wait beyond DelayMillis since last sent.
 
+# License
 
+Batched flume appender is released according to MIT License.
